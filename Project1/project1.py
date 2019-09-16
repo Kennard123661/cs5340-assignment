@@ -6,6 +6,8 @@ import math
 import numpy as np
 from tqdm import tqdm
 
+import matplotlib.pyplot as plt
+
 
 base_dir = os.path.abspath(os.path.dirname(__file__))
 if __name__ == '__main__':
@@ -20,10 +22,15 @@ camera_parameters_filepath = os.path.join(base_dir, 'cameraParameters.mat')
 result_dir = os.path.join(base_dir, 'results')
 grayscale_dir = os.path.join(result_dir, 'grayscale')
 pixel_dir = os.path.join(result_dir, 'pixel')
+initial_vp_dir = os.path.join(result_dir, 'initial-vp')
 
 VANISHING_POINT_DIRECTIONS = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, 0]]
 EDGE_MODELS_PRIOR = [0.02, 0.02, 0.02, 0.04, 0.09]
 NUM_MODELS = 5
+
+IMAGE_WIDTH = 640
+IMAGE_HEIGHT = 480
+VP_THRESHOLD = 1000
 
 
 def read_image(filename):
@@ -93,10 +100,10 @@ def compute_posterior(camera_intrinsics, a, b, g, pixel_locations, pixel_grad_di
             if m <= 3:
                 vp_theta = vp_thetas[m_idx]
                 prob_on = compute_prob_ang(pixel_grad_direction - vp_theta)
-                posterior += prob_on
+                posterior += prob_on * EDGE_MODELS_PRIOR[m_idx]
             else:  # m = {4, 5}
                 prob_off = 1 / (2 * math.pi)
-                posterior += prob_off
+                posterior += prob_off * EDGE_MODELS_PRIOR[m_idx]
     return posterior
 
 
@@ -156,7 +163,38 @@ def annotate_pixel_locations(image, pixel_locations, save_filename, region_size=
     save_image(image_to_annotate, save_dir=pixel_dir, save_filename=save_filename)
 
 
+def get_vp_from_euler_angles(camera_intrisincs, euler_angles):
+    assert len(euler_angles) == 3
+    euler_angles_in_radian = [degree_to_radian(euler_angle) for euler_angle in euler_angles]
+    rot_matrix = helper_functions.angle2matrix(*euler_angles_in_radian)
+    vanishing_points = np.matmul(camera_intrisincs, np.matmul(rot_matrix, helper_functions.vp_dir))
+    return vanishing_points
+
+
+def save_vanishing_points(image, homogenous_vanishing_points, filename, save_dir):
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    image = copy.deepcopy(image)
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # otherwise the color will be weird
+    save_filepath = os.path.join(save_dir, filename[:-3] + 'png')
+    plt.imshow(image)
+
+    x, y = list(), list()
+    for i in range(3):
+        if homogenous_vanishing_points[2, i] == float(0):
+            continue  # will be an infinity
+
+        u, v = homogenous_vanishing_points[:2, i] / homogenous_vanishing_points[2, i]
+        if -VP_THRESHOLD < u < (IMAGE_WIDTH + VP_THRESHOLD) and -VP_THRESHOLD < v < (IMAGE_HEIGHT + VP_THRESHOLD):
+            x.append(u)
+            y.append(v)
+    plt.scatter(x, y)
+    plt.savefig(save_filepath)
+    plt.close()
+
+
 def process_image(image_filename):
+    print('Processing {}'.format(image_filename))
     image = read_image(image_filename)
     camera_intrinsics = helper_functions.cam_intrinsics(camera_parameters_filepath)
 
@@ -167,18 +205,20 @@ def process_image(image_filename):
     pixel_idxs = get_em_pixel_idxs(grad_mags=grad_mags, grad_directions=grad_directions)
     annotate_pixel_locations(image, pixel_idxs, image_filename)
 
-    pixel_grad_mags, pixel_grad_directions = get_pixel_gradients(grad_mags, grad_directions, pixel_idxs)
-    initial_euler_angles = estimate_initial_euler_angles(camera_intrinsics, pixel_idxs, pixel_grad_directions)
-    print(initial_euler_angles)
+    pixel_locations = np.array(pixel_idxs) * 5 + 4
+    pixel_grad_mags, pixel_grad_directions = get_pixel_gradients(grad_mags, grad_directions, pixel_locations)
+    initial_euler_angles, initial_max_posterior = estimate_initial_euler_angles(camera_intrinsics, pixel_locations,
+                                                                                pixel_grad_directions)
+    initial_vp = get_vp_from_euler_angles(camera_intrinsics, initial_euler_angles)
+    save_vanishing_points(image, homogenous_vanishing_points=initial_vp, filename=image_filename,
+                          save_dir=initial_vp_dir)
 
 
-def get_pixel_gradients(grad_mags, grad_directions, pixel_idxs):
-    downsampled_grad_directions = grad_directions[4::5]
-    downsampled_grad_mags = grad_mags[4::5]
+def get_pixel_gradients(grad_mags, grad_directions, pixel_locations):
     pixel_grad_mags, pixel_grad_directions = list(), list()
-    for i, j in pixel_idxs:
-        pixel_grad_mags.append(downsampled_grad_mags[i, j])
-        pixel_grad_directions.append(downsampled_grad_directions[i, j])
+    for i, j in pixel_locations:
+        pixel_grad_mags.append(grad_mags[i, j])
+        pixel_grad_directions.append(grad_directions[i, j])
     return np.array(pixel_grad_mags), np.array(pixel_grad_directions)
 
 
