@@ -2,7 +2,9 @@ import os
 import cv2
 import sys
 import copy
+import math
 import numpy as np
+from tqdm import tqdm
 
 
 base_dir = os.path.abspath(os.path.dirname(__file__))
@@ -21,6 +23,7 @@ pixel_dir = os.path.join(result_dir, 'pixel')
 
 VANISHING_POINT_DIRECTIONS = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, 0]]
 EDGE_MODELS_PRIOR = [0.02, 0.02, 0.02, 0.04, 0.09]
+NUM_MODELS = 5
 
 
 def read_image(filename):
@@ -48,24 +51,98 @@ def save_image(image, save_dir, save_filename):
 
 
 def get_image_gradients(image):
+    """ Returns gradient magnitudes and directions. The direction is given as an angle in degrees. """
+    image_width, image_height = image.shape
     grad_x = np.array(cv2.Sobel(image, cv2.CV_64F, 1, 0, ksize=5))
     grad_y = np.array(cv2.Sobel(image, cv2.CV_64F, 0, 1, ksize=5))
 
     # grad directions represent as (cos\theta, sin\theta)
     grad_mag = np.sqrt(np.square(np.array(grad_x)) + np.square(np.array(grad_y)))
-    grad_direction = np.concatenate([np.expand_dims(grad_x, axis=-1), np.expand_dims(grad_y, axis=-1)], axis=-1)
+    grad_direction = np.zeros_like(grad_mag)
+    for i in range(image_width):
+        for j in range(image_height):
+            if grad_x[i, j] == 0:
+                grad_direction[i, j] = 90
+            elif grad_y[i, j] == 0:
+                grad_direction[i, j] = 0
+            else:
+                grad_direction[i, j] = math.atan2(grad_y[i, j], grad_x[i, j]) / math.pi * 180
     return np.array(grad_mag), np.array(grad_direction)
 
 
-def get_initial_rot_estimate(camera_intrinsics, pixel_grad_mags, pixel_grad_directions):
+def compute_prob_ang(angle, tau=6, eps=0.1):
+    tau = degree_to_radian(tau)
+    angle = angle % (2 * math.pi)
+    if -tau <= angle <= tau or math.pi - tau <= angle <= math.pi + tau:  # deviation of at most tau
+        return (1 - eps) / (4 * tau)
+    else:
+        return eps / (2 * math.pi - 4 * tau)
+
+
+def compute_posterior(camera_intrinsics, a, b, g, pixel_locations, pixel_grad_directions):
+    a, b, g = degree_to_radian(a), degree_to_radian(b), degree_to_radian(g)
+    rot_matrix = helper_functions.angle2matrix(a, b, g)
+    posterior = 0
+
+    for i, pixel_location in enumerate(pixel_locations):
+        homogenous_location = list(pixel_location) + [1]
+        pixel_grad_direction = pixel_grad_directions[i]
+        vp_thetas = helper_functions.vp2dir(camera_intrinsics, rot_matrix, homogenous_location)
+        for m_idx in range(NUM_MODELS):  # marginalize
+            m = m_idx + 1
+            if m <= 3:
+                vp_theta = vp_thetas[m_idx]
+                prob_on = compute_prob_ang(pixel_grad_direction - vp_theta)
+                posterior += prob_on
+            else:  # m = {4, 5}
+                prob_off = 1 / (2 * math.pi)
+                posterior += prob_off
+    return posterior
+
+
+def degree_to_radian(angle_in_degrees):
+    return angle_in_degrees / 180 * math.pi
+
+
+def estimate_initial_euler_angles(camera_intrinsics, pixel_locations, pixel_grad_directions):
     """ Reimplementation of https://pdfs.semanticscholar.org/3f12/20be9e783caa716482863af4a671197c6aeb.pdf """
-    a, g = 0, 0
-    for b in range(-45, 46, 4):
-        rot_matrix = helper_functions.angle2matrix(a, b, g)
-        vanishing_points = np.matmul(camera_intrinsics, np.matmul(rot_matrix, VANISHING_POINT_DIRECTIONS))
-        print(vanishing_points)
-        break
-    return 1
+    best_posterior = None
+    best_posterior_degrees = [0, 0, 0]
+
+    # search along b first
+    print("Searching for best initial euler angles")
+    for b in tqdm(range(-45, 46, 4)):
+        posterior = compute_posterior(camera_intrinsics, a=0, b=b, g=0, pixel_locations=pixel_locations,
+                                      pixel_grad_directions=pixel_grad_directions)
+        if best_posterior is None:  # set initial values
+            best_posterior = posterior
+            best_posterior_degrees[1] = b
+
+        if best_posterior < posterior:
+            best_posterior = posterior
+            best_posterior_degrees[1] = b
+
+    # medium-scale search:
+    medium_search_multipliers = np.array([-1, 0, 1], dtype=float)
+    for b in medium_search_multipliers * 2 + best_posterior_degrees[1]:
+        for a in medium_search_multipliers * 5:
+            for g in medium_search_multipliers * 5:
+                posterior = compute_posterior(camera_intrinsics, a=a, b=b, g=g, pixel_locations=pixel_locations,
+                                              pixel_grad_directions=pixel_grad_directions)
+                if best_posterior < posterior:
+                    best_posterior = posterior
+                    best_posterior_degrees = [a, b, g]
+
+    # fine-scale-search
+    fine_search_multipliers = np.array([-2, -1, 0, 1, 2], dtype=float)
+    for a in fine_search_multipliers * 2.5 + best_posterior_degrees[0]:
+        for g in fine_search_multipliers * 2.5 + best_posterior_degrees[2]:
+            posterior = compute_posterior(camera_intrinsics, a=a, b=best_posterior_degrees[1], g=g,
+                                          pixel_locations=pixel_locations, pixel_grad_directions=pixel_grad_directions)
+            if best_posterior < posterior:
+                best_posterior = posterior
+                best_posterior_degrees = [a, best_posterior_degrees[1], g]
+    return best_posterior_degrees, best_posterior
 
 
 def annotate_pixel_locations(image, pixel_locations, save_filename, region_size=1, color=(0, 0, 255)):
@@ -91,9 +168,8 @@ def process_image(image_filename):
     annotate_pixel_locations(image, pixel_idxs, image_filename)
 
     pixel_grad_mags, pixel_grad_directions = get_pixel_gradients(grad_mags, grad_directions, pixel_idxs)
-    print(pixel_grad_mags.shape)
-    print(pixel_grad_directions.shape)
-    rot_estimate = get_initial_rot_estimate(camera_intrinsics, pixel_grad_mags, pixel_grad_directions)
+    initial_euler_angles = estimate_initial_euler_angles(camera_intrinsics, pixel_idxs, pixel_grad_directions)
+    print(initial_euler_angles)
 
 
 def get_pixel_gradients(grad_mags, grad_directions, pixel_idxs):
