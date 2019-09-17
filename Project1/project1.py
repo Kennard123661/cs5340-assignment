@@ -203,7 +203,7 @@ def save_vanishing_points(image, homogenous_vanishing_points, filename, save_dir
 
 def expectation_step(camera_intrinsics, rot_matrix, pixel_locations, pixel_grad_directions):
     pixel_assignment_probs = list()
-    for i, (u, v) in enumerate(tqdm(pixel_locations)):
+    for i, (u, v) in enumerate(pixel_locations):
         pixel_grad_direction = pixel_grad_directions[i]
         homogenous_location = [u, v, 1]
         vp_thetas = helper_functions.vp2dir(camera_intrinsics, rot_matrix, homogenous_location)
