@@ -193,6 +193,36 @@ def save_vanishing_points(image, homogenous_vanishing_points, filename, save_dir
     plt.close()
 
 
+def expectation_step(camera_intrinsics, rot_matrix, pixel_locations, pixel_grad_directions):
+    pixel_assignment_probs = list()
+    for i, pixel_location in pixel_locations:
+        pixel_grad_direction = pixel_grad_directions[i]
+        homogenous_location = list(pixel_locations) + [1]
+        vp_thetas = helper_functions.vp2dir(camera_intrinsics, rot_matrix, homogenous_location)
+
+        pixel_assignment_prob = np.zeros(shape=5)
+        for m_idx in range(NUM_MODELS):
+            m = m_idx + 1
+            if m <= 3:
+                assignment_prob = compute_prob_ang(pixel_grad_direction - vp_thetas[m_idx])
+            else:
+                assignment_prob = 1 / (2 * math.pi)
+            assignment_prob *= EDGE_MODELS_PRIOR[m_idx]
+            pixel_assignment_prob[m_idx] = assignment_prob
+        pixel_assignment_probs.append(pixel_assignment_prob)
+    return np.array(pixel_assignment_probs, dtype=float)
+
+
+def cgr_func(s):
+    cs = ((1 - np.transposes))
+
+
+
+def minimization_step(rot_matrix):
+    initial_s = helper_functions.matrix2vector(rot_matrix)
+
+
+
 def process_image(image_filename):
     print('Processing {}'.format(image_filename))
     image = read_image(image_filename)
@@ -212,6 +242,10 @@ def process_image(image_filename):
     initial_vp = get_vp_from_euler_angles(camera_intrinsics, initial_euler_angles)
     save_vanishing_points(image, homogenous_vanishing_points=initial_vp, filename=image_filename,
                           save_dir=initial_vp_dir)
+
+    # preprocess for
+    initial_euler_radians = [degree_to_radian(angle) for angle in initial_euler_angles]
+    initial_rot = helper_functions.angle2matrix(*initial_euler_angles)
 
 
 def get_pixel_gradients(grad_mags, grad_directions, pixel_locations):
