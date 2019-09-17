@@ -4,11 +4,11 @@ import sys
 import copy
 import math
 import scipy.optimize as optim
+import scipy.stats as stats
 import numpy as np
 from tqdm import tqdm
 
 import matplotlib.pyplot as plt
-
 
 base_dir = os.path.abspath(os.path.dirname(__file__))
 if __name__ == '__main__':
@@ -26,6 +26,7 @@ pixel_dir = os.path.join(result_dir, 'pixel')
 initial_vp_dir = os.path.join(result_dir, 'initial-vp')
 final_vp_dir = os.path.join(result_dir, 'final-vp')
 
+P_ANG = stats.norm(0, 0.13)
 VANISHING_POINT_DIRECTIONS = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, 0]]
 EDGE_MODELS_PRIOR = [0.02, 0.02, 0.02, 0.04, 0.09]
 NUM_MODELS = 5
@@ -82,8 +83,8 @@ def get_image_gradients(image):
 
 def compute_prob_ang(angle, tau=6, eps=0.1):
     tau = degree_to_radian(tau)
-    angle = angle % (2 * math.pi)
-    if -tau <= angle <= tau or math.pi - tau <= angle <= math.pi + tau:  # deviation of at most tau
+    angle = helper_functions.remove_polarity(angle % (2 * math.pi))
+    if -tau <= angle <= tau:  # deviation of at most tau
         return (1 - eps) / (4 * tau)
     else:
         return eps / (2 * math.pi - 4 * tau)
@@ -202,7 +203,7 @@ def save_vanishing_points(image, homogenous_vanishing_points, filename, save_dir
 
 def expectation_step(camera_intrinsics, rot_matrix, pixel_locations, pixel_grad_directions):
     pixel_assignment_probs = list()
-    for i, (u, v) in enumerate(pixel_locations):
+    for i, (u, v) in enumerate(tqdm(pixel_locations)):
         pixel_grad_direction = pixel_grad_directions[i]
         homogenous_location = [u, v, 1]
         vp_thetas = helper_functions.vp2dir(camera_intrinsics, rot_matrix, homogenous_location)
@@ -211,11 +212,12 @@ def expectation_step(camera_intrinsics, rot_matrix, pixel_locations, pixel_grad_
         for m_idx in range(NUM_MODELS):
             m = m_idx + 1
             if m <= 3:
-                assignment_prob = compute_prob_ang(pixel_grad_direction - vp_thetas[m_idx])
+                assignment_prob = P_ANG.pdf(helper_functions.remove_polarity(pixel_grad_direction - vp_thetas[m_idx]))
             else:
                 assignment_prob = 1 / (2 * math.pi)
             assignment_prob *= EDGE_MODELS_PRIOR[m_idx]
             pixel_assignment_prob[m_idx] = assignment_prob
+        # pixel_assignment_prob /= np.sum(pixel_assignment_prob)
         pixel_assignment_probs.append(pixel_assignment_prob)
     return np.array(pixel_assignment_probs, dtype=float)
 
@@ -259,7 +261,7 @@ def annotate_assignments(image, pixel_locations, pixel_assignments):
     annotated_image = copy.deepcopy(image)
     for i, (u, v) in enumerate(pixel_locations):
         pixel_assignment = pixel_assignments[i]
-        idx = np.argmax(pixel_assignment)
+        idx = np.argmax(pixel_assignment[:3])
         if idx >= 3:  # model 4, 5
             continue
         else:
@@ -315,7 +317,8 @@ def process_image(image_filename):
     initial_euler_radians = [degree_to_radian(angle) for angle in initial_euler_angles]
     rot_matrix = helper_functions.angle2matrix(*initial_euler_radians)
 
-    assignment_probs, final_rot_matrix = em_optimize(camera_intrinsics, pixel_grad_directions, pixel_locations, rot_matrix)
+    assignment_probs, final_rot_matrix = em_optimize(camera_intrinsics, pixel_grad_directions, pixel_locations,
+                                                     rot_matrix)
     final_vp = np.matmul(camera_intrinsics, np.matmul(final_rot_matrix, helper_functions.vp_dir))
     annotated_image = annotate_assignments(image, pixel_locations, assignment_probs)
     save_vanishing_points(annotated_image, final_vp, filename=image_filename, save_dir=final_vp_dir)
