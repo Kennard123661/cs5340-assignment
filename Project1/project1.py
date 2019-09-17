@@ -3,6 +3,7 @@ import cv2
 import sys
 import copy
 import math
+import scipy.optimize as optim
 import numpy as np
 from tqdm import tqdm
 
@@ -213,14 +214,45 @@ def expectation_step(camera_intrinsics, rot_matrix, pixel_locations, pixel_grad_
     return np.array(pixel_assignment_probs, dtype=float)
 
 
-def cgr_func(s):
-    cs = ((1 - np.transposes))
+def get_cgr_rot_matrix(s):
+    s = s.reshape(-1)
+    cs_bar = (1 - np.dot(s, s)) * np.identity(3) + 2 * helper_functions.skew(s) + 2 * np.matmul(np.reshape(s, (1, -1)),
+                                                                                                np.reshape(s, (-1, 1)))
+    cs = cs_bar / (1 + np.dot(s, s))
+    return cs
 
 
+def minimization_func(s, camera_intrinsics, pixel_locations, pixel_grads, pixel_assignments):
+    rot_matrix = get_cgr_rot_matrix(s)
+    objective = 0
+    for i, (u, v) in enumerate(pixel_locations):
+        homoegenous_pixel_location = [u, v, 1]
+        pixel_grad = pixel_grads[i]
+        pixel_assignment = pixel_assignments[i]
 
-def minimization_step(rot_matrix):
+        pixel_objective = 0
+        thetas = helper_functions.vp2dir(camera_intrinsics, rot_matrix, homoegenous_pixel_location)
+        for j, wpm in enumerate(pixel_assignment[:3]):  # minimize over first 3 models
+            pixel_objective += wpm * (pixel_grad - thetas[j])^2
+        objective += pixel_objective
+    return objective
+
+
+def minimization_step(rot_matrix, camera_intrinsics, pixel_locations, pixel_grads, pixel_assignments):
+    """ Sum over the difference in gradients and estimated gradients theta i.e. vanishing point. """
     initial_s = helper_functions.matrix2vector(rot_matrix)
+    s = optim.leastsq(func=minimization_func, x0=initial_s,
+                      args=(camera_intrinsics, pixel_locations, pixel_grads, pixel_assignments))
+    rot = helper_functions.vector2matrix(s)
+    return rot
 
+
+def get_pixel_gradients(grad_mags, grad_directions, pixel_locations):
+    pixel_grad_mags, pixel_grad_directions = list(), list()
+    for i, j in pixel_locations:
+        pixel_grad_mags.append(grad_mags[i, j])
+        pixel_grad_directions.append(grad_directions[i, j])
+    return np.array(pixel_grad_mags), np.array(pixel_grad_directions)
 
 
 def process_image(image_filename):
@@ -245,15 +277,20 @@ def process_image(image_filename):
 
     # preprocess for
     initial_euler_radians = [degree_to_radian(angle) for angle in initial_euler_angles]
-    initial_rot = helper_functions.angle2matrix(*initial_euler_angles)
-
-
-def get_pixel_gradients(grad_mags, grad_directions, pixel_locations):
-    pixel_grad_mags, pixel_grad_directions = list(), list()
-    for i, j in pixel_locations:
-        pixel_grad_mags.append(grad_mags[i, j])
-        pixel_grad_directions.append(grad_directions[i, j])
-    return np.array(pixel_grad_mags), np.array(pixel_grad_directions)
+    rot_matrix = helper_functions.angle2matrix(*initial_euler_radians)
+    assignment_probs = None
+    for _ in range(100):
+        assignment_probs = expectation_step(camera_intrinsics=camera_intrinsics,
+                                            rot_matrix=rot_matrix,
+                                            pixel_locations=pixel_locations,
+                                            pixel_grad_directions=pixel_grad_directions)
+        rot_matrix = minimization_step(rot_matrix=rot_matrix, camera_intrinsics=camera_intrinsics,
+                                       pixel_locations=pixel_locations, pixel_grads=pixel_grad_directions,
+                                       pixel_assignments=assignment_probs)
+    final_vp = np.matmul(camera_intrinsics, np.matmul(rot_matrix, helper_functions.vp_dir))
+    print(final_vp)
+    print(rot_matrix)
+    print(assignment_probs)
 
 
 if __name__ == '__main__':
