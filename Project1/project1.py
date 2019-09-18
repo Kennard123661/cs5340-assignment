@@ -24,6 +24,7 @@ result_dir = os.path.join(base_dir, 'results')
 grayscale_dir = os.path.join(result_dir, 'grayscale')
 pixel_dir = os.path.join(result_dir, 'pixel')
 initial_vp_dir = os.path.join(result_dir, 'initial-vp')
+assignment_dir = os.path.join(result_dir, 'assignment')
 final_vp_dir = os.path.join(result_dir, 'final-vp')
 
 P_ANG = stats.norm(0, 0.13)
@@ -215,7 +216,7 @@ def expectation_step(camera_intrinsics, rot_matrix, pixel_locations, pixel_grad_
                 assignment_prob = P_ANG.pdf(helper_functions.remove_polarity(pixel_grad_direction - vp_thetas[m_idx]))
             else:
                 assignment_prob = 1 / (2 * math.pi)
-            assignment_prob *= EDGE_MODELS_PRIOR[m_idx]
+            assignment_prob += math.log(EDGE_MODELS_PRIOR[m_idx], base=10)
             pixel_assignment_prob[m_idx] = assignment_prob
         # pixel_assignment_prob /= np.sum(pixel_assignment_prob)
         pixel_assignment_probs.append(pixel_assignment_prob)
@@ -273,7 +274,7 @@ def annotate_assignments(image, pixel_locations, pixel_assignments):
 
 def em_optimize(camera_intrinsics, pixel_grad_directions, pixel_locations, rot_matrix):
     assignment_probs = None
-    best_cost = None
+    lowest_cost = None
     best_timestamp = 0
     for timestamp in tqdm(range(100)):
         assignment_probs = expectation_step(camera_intrinsics=camera_intrinsics,
@@ -283,8 +284,8 @@ def em_optimize(camera_intrinsics, pixel_grad_directions, pixel_locations, rot_m
         rot_matrix, cost = minimization_step(rot_matrix=rot_matrix, camera_intrinsics=camera_intrinsics,
                                              pixel_locations=pixel_locations, pixel_grads=pixel_grad_directions,
                                              pixel_assignments=assignment_probs)
-        if best_cost is None or best_cost > cost:
-            best_cost = cost
+        if lowest_cost is None or lowest_cost > cost:
+            lowest_cost = cost
             best_timestamp = timestamp
 
         if (best_timestamp - timestamp) > IMPROVEMENT_PATIENCE:
@@ -321,7 +322,8 @@ def process_image(image_filename):
                                                      rot_matrix)
     final_vp = np.matmul(camera_intrinsics, np.matmul(final_rot_matrix, helper_functions.vp_dir))
     annotated_image = annotate_assignments(image, pixel_locations, assignment_probs)
-    save_vanishing_points(annotated_image, final_vp, filename=image_filename, save_dir=final_vp_dir)
+    save_image(annotated_image, save_dir=assignment_dir, save_filename=image_filename)
+    save_vanishing_points(image, final_vp, filename=image_filename, save_dir=final_vp_dir)
 
     print('rotation matrix:\n{}'.format(final_rot_matrix))
     rot_matrix_filename = image_filename[:-3] + '.npy'
