@@ -220,28 +220,27 @@ def expectation_step(camera_intrinsics, rot_matrix, pixel_locations, pixel_grad_
 
 
 def minimization_func(s, camera_intrinsics, pixel_locations, pixel_grads, pixel_assignments):
+    residuals = list()
     rot_matrix = helper_functions.vector2matrix(s)
-    objective = 0
-    for i, (u, v) in enumerate(pixel_locations):
-        homoegenous_pixel_location = [u, v, 1]
-        pixel_grad = pixel_grads[i]
-        pixel_assignment = pixel_assignments[i]
-
-        pixel_objective = 0
-        thetas = helper_functions.vp2dir(camera_intrinsics, rot_matrix, homoegenous_pixel_location)
-        for j, wpm in enumerate(pixel_assignment[:3]):  # minimize over first 3 models
-            pixel_objective += wpm * (helper_functions.remove_polarity(pixel_grad - thetas[j]))**2
-        objective += pixel_objective
-    return objective
+    for i, location in enumerate(pixel_locations):
+        thetas = helper_functions.vp2dir(camera_intrinsics, rot_matrix, location)
+        grad = pixel_grads[i]
+        assignments = pixel_assignments[i]
+        for j, wpm in enumerate(assignments):  # minimize over first 3 models
+            residuals.append(math.sqrt(wpm) * (helper_functions.remove_polarity(grad - thetas[j])))
+    return np.array(residuals)
 
 
 def minimization_step(rot_matrix, camera_intrinsics, pixel_locations, pixel_grads, pixel_assignments):
     """ Sum over the difference in gradients and estimated gradients theta i.e. vanishing point. """
     initial_s = helper_functions.matrix2vector(rot_matrix)
-    minimization_func(initial_s, camera_intrinsics, pixel_locations, pixel_grads, pixel_assignments)
+
+    grads = np.array(pixel_grads)
+    assignments = np.array(pixel_assignments)
     result = optim.least_squares(minimization_func, x0=initial_s,
-                                 args=(camera_intrinsics, pixel_locations, pixel_grads, pixel_assignments))
+                                 args=(camera_intrinsics, pixel_locations, grads, assignments))
     # assert isinstance(result, optim.OptimizeResult)
+
     rot = helper_functions.vector2matrix(result.x)
     return rot, result.cost
 
@@ -272,13 +271,15 @@ def em_optimize(camera_intrinsics, pixel_grad_directions, pixel_locations, rot_m
     assignment_probs = None
     lowest_cost = None
     best_timestamp = 0
+
+    grad_in_radians = [degree_to_radian(direction) for direction in pixel_grad_directions]
     for timestamp in tqdm(range(100)):
         assignment_probs = expectation_step(camera_intrinsics=camera_intrinsics,
                                             rot_matrix=rot_matrix,
                                             pixel_locations=pixel_locations,
-                                            pixel_grad_directions=pixel_grad_directions)
+                                            pixel_grad_directions=grad_in_radians)
         rot_matrix, cost = minimization_step(rot_matrix=rot_matrix, camera_intrinsics=camera_intrinsics,
-                                             pixel_locations=pixel_locations, pixel_grads=pixel_grad_directions,
+                                             pixel_locations=pixel_locations, pixel_grads=grad_in_radians,
                                              pixel_assignments=assignment_probs)
         if lowest_cost is None or lowest_cost > cost:
             lowest_cost = cost
@@ -312,17 +313,18 @@ def process_image(image_filename):
 
     initial_euler_radians = [degree_to_radian(angle) for angle in initial_euler_angles]
     rot_matrix = helper_functions.angle2matrix(*initial_euler_radians)
+
     assignment_probs, final_rot_matrix = em_optimize(camera_intrinsics, pixel_grad_directions, pixel_locations,
                                                      rot_matrix)
-    # final_vp = np.matmul(camera_intrinsics, np.matmul(final_rot_matrix, helper_functions.vp_dir))
-    # annotated_image = annotate_assignments(image, pixel_locations, assignment_probs)
-    # save_image(annotated_image, save_dir=assignment_dir, save_filename=image_filename)
-    # save_vanishing_points(image, final_vp, filename=image_filename, save_dir=final_vp_dir)
-    #
-    # print('rotation matrix:\n{}'.format(final_rot_matrix))
-    # rot_matrix_filename = image_filename[:-3] + '.npy'
-    # rot_matrix_filepath = os.path.join(final_vp_dir, rot_matrix_filename)
-    # np.save(rot_matrix_filepath, final_rot_matrix)
+    final_vp = np.matmul(camera_intrinsics, np.matmul(final_rot_matrix, helper_functions.vp_dir))
+    annotated_image = annotate_assignments(image, pixel_locations, assignment_probs)
+    save_image(annotated_image, save_dir=assignment_dir, save_filename=image_filename)
+    save_vanishing_points(image, final_vp, filename=image_filename, save_dir=final_vp_dir)
+
+    print('rotation matrix:\n{}'.format(final_rot_matrix))
+    rot_matrix_filename = image_filename[:-3] + '.npy'
+    rot_matrix_filepath = os.path.join(final_vp_dir, rot_matrix_filename)
+    np.save(rot_matrix_filepath, final_rot_matrix)
 
 
 if __name__ == '__main__':
