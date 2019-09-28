@@ -29,6 +29,11 @@ final_vp_dir = os.path.join(result_dir, 'final-vp')
 
 P_ANG = stats.norm(0, 0.13)
 
+
+def p_ang(x):
+    return 1 / (0.13 * math.sqrt(2 * math.pi)) * math.exp(-x**2 / (2 * 0.13**2))
+
+
 VANISHING_POINT_DIRECTIONS = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, 0]]
 EDGE_MODELS_PRIOR = [0.02, 0.02, 0.02, 0.04, 0.09]
 NUM_MODELS = 5
@@ -214,7 +219,7 @@ def expectation_step(camera_intrinsics, rot_matrix, pixel_locations, pixel_grad_
         for m_idx in range(NUM_MODELS):
             m = m_idx + 1
             if m < 3:
-                assignment_prob = P_ANG.pdf(helper_functions.remove_polarity(pixel_grad_direction - vp_thetas[m_idx]))
+                assignment_prob = p_ang(helper_functions.remove_polarity(pixel_grad_direction - vp_thetas[m_idx]))
             else:
                 assignment_prob = 1 / (2 * math.pi)
             assignment_prob *= EDGE_MODELS_PRIOR[m_idx]
