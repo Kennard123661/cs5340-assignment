@@ -210,11 +210,16 @@ def expectation_step(camera_intrinsics, rot_matrix, pixel_locations, pixel_grad_
         homogenous_location = [u, v, 1]
         vp_thetas = helper_functions.vp2dir(camera_intrinsics, rot_matrix, homogenous_location)
 
-        pixel_assignment_prob = np.zeros(shape=3)
-        for m_idx in range(3):
-            assignment_prob = P_ANG.pdf(helper_functions.remove_polarity(pixel_grad_direction - vp_thetas[m_idx]))
-            # assignment_prob *= EDGE_MODELS_PRIOR[m_idx]
+        pixel_assignment_prob = np.zeros(shape=NUM_MODELS)
+        for m_idx in range(NUM_MODELS):
+            m = m_idx + 1
+            if m <= 3:
+                assignment_prob = P_ANG.pdf(helper_functions.remove_polarity(pixel_grad_direction - vp_thetas[m_idx]))
+            else:
+                assignment_prob = 1 / (2 * math.pi)
+            assignment_prob *= EDGE_MODELS_PRIOR[m_idx]
             pixel_assignment_prob[m_idx] = assignment_prob
+        pixel_assignment_prob /= np.sum(pixel_assignment_prob)
         pixel_assignment_probs.append(pixel_assignment_prob)
     return np.array(pixel_assignment_probs, dtype=float)
 
