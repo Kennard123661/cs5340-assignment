@@ -1,337 +1,194 @@
-import os
+import em_help_functions as helper_fn
+from em_help_functions import cam_intrinsics as get_camera_intrinsics
 import cv2
-import sys
-import copy
-import math
-import scipy.optimize as optim
-import scipy.stats as stats
 import numpy as np
-from tqdm import tqdm
+import scipy.stats as stats
+from scipy.optimize import least_squares
+import os
+import time
+import math
 
-import matplotlib.pyplot as plt
+from utils import save_vanishing_points, save_assignments, save_rotation_matrix
+
+PRIOR_DISTRIBUTION = helper_fn.P_m_prior
+P_ANG = stats.norm(helper_fn.mu, helper_fn.sig)
 
 base_dir = os.path.abspath(os.path.dirname(__file__))
-if __name__ == '__main__':
-    sys.path.append(base_dir)
-
-import EM_help_fucntions as helper_functions
-
+data_dir = os.path.join(base_dir, 'data')
+result_dir = os.path.join(base_dir, 'result')
 image_filenames = ['P1030001.jpg', 'P1080055.jpg']
-image_filepaths = [os.path.join(base_dir, image_filename) for image_filename in image_filenames]
-camera_parameters_filepath = os.path.join(base_dir, 'cameraParameters.mat')
+camera_intrinsics_filepath = os.path.join(data_dir, 'cameraParameters.mat')
 
-result_dir = os.path.join(base_dir, 'results')
-grayscale_dir = os.path.join(result_dir, 'grayscale')
-pixel_dir = os.path.join(result_dir, 'pixel')
-initial_vp_dir = os.path.join(result_dir, 'initial-vp')
-assignment_dir = os.path.join(result_dir, 'assignment')
-final_vp_dir = os.path.join(result_dir, 'final-vp')
-
-P_ANG = stats.norm(0, 0.13)
-
-VANISHING_POINT_DIRECTIONS = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, 0]]
-EDGE_MODELS_PRIOR = [0.02, 0.02, 0.02, 0.04, 0.09]
-NUM_MODELS = 5
-IMPROVEMENT_PATIENCE = 5
-
+N_ITERATIONS = 20
 IMAGE_WIDTH = 640
 IMAGE_HEIGHT = 480
 VP_THRESHOLD = 1000
 
 
-def read_image(filename):
-    filepath = os.path.join(base_dir, filename)
-    return cv2.imread(filepath)
+def read_image(image_filepath):
+    image = cv2.imread(image_filepath)
+    return image
 
 
 def get_grayscale_image(image):
-    """ Converts the image to grayscale and downsamples the image by resizing by a factor of 0.2 """
     grayscale_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     return grayscale_image
 
 
-def get_em_pixel_idxs(grad_mags, grad_directions):
-    _, downsampled_idxs = helper_functions.down_sample(Gmag_=grad_mags, Gdir_=grad_directions)
-    downsampled_idxs = np.array(downsampled_idxs)
-    return downsampled_idxs
+def get_image_gradients(grayscale_image):
+    sobel_x = cv2.Sobel(grayscale_image, cv2.CV_64F, 1, 0)
+    sobel_y = cv2.Sobel(grayscale_image, cv2.CV_64F, 0, 1)
+    grad_mag = np.sqrt(sobel_x**2 + sobel_y**2)
+    grad_dir = np.arctan2(sobel_y, sobel_x)
+    return grad_mag, grad_dir
 
 
-def save_image(image, save_dir, save_filename):
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-    filepath = os.path.join(save_dir, save_filename)
-    cv2.imwrite(filepath, image)
-
-
-def get_image_gradients(image):
-    """ Returns gradient magnitudes and directions. The direction is given as an angle in degrees. """
-    image_width, image_height = image.shape
-    grad_x = np.array(cv2.Sobel(image, cv2.CV_64F, 1, 0, ksize=5))
-    grad_y = np.array(cv2.Sobel(image, cv2.CV_64F, 0, 1, ksize=5))
-
-    # grad directions represent as (cos\theta, sin\theta)
-    grad_mag = np.sqrt(np.square(np.array(grad_x)) + np.square(np.array(grad_y)))
-    grad_direction = np.zeros_like(grad_mag)
-    for i in range(image_width):
-        for j in range(image_height):
-            if grad_x[i, j] == 0:
-                grad_direction[i, j] = 90
-            elif grad_y[i, j] == 0:
-                grad_direction[i, j] = 0
-            else:
-                grad_direction[i, j] = math.atan2(grad_y[i, j], grad_x[i, j]) / math.pi * 180
-    return np.array(grad_mag), np.array(grad_direction)
-
-
-def compute_prob_ang(angle, tau=6, eps=0.1):
-    tau = degree_to_radian(tau)
-    angle = helper_functions.remove_polarity(angle % (2 * math.pi))
-    if -tau <= angle <= tau:  # deviation of at most tau
-        return (1 - eps) / (4 * tau)
-    else:
-        return eps / (2 * math.pi - 4 * tau)
-
-
-def compute_posterior(camera_intrinsics, a, b, g, pixel_locations, pixel_grad_directions):
-    a, b, g = degree_to_radian(a), degree_to_radian(b), degree_to_radian(g)
-    rot_matrix = helper_functions.angle2matrix(a, b, g)
+def compute_posterior(a, b, g, pixel_idxs, pixel_grads, camera_intrinsics):
+    rotation_mtx = helper_fn.angle2matrix(a, b, g)
     posterior = 0
 
-    for i, pixel_location in enumerate(pixel_locations):
-        homogenous_location = list(pixel_location) + [1]
-        pixel_grad_direction = pixel_grad_directions[i]
-        vp_thetas = helper_functions.vp2dir(camera_intrinsics, rot_matrix, homogenous_location)
-        for m_idx in range(NUM_MODELS):  # marginalize
-            m = m_idx + 1
-            if m <= 3:
-                vp_theta = vp_thetas[m_idx]
-                prob_on = compute_prob_ang(pixel_grad_direction - vp_theta)
-                posterior += prob_on * EDGE_MODELS_PRIOR[m_idx]
-            else:  # m = {4, 5}
-                prob_off = 1 / (2 * math.pi)
-                posterior += prob_off * EDGE_MODELS_PRIOR[m_idx]
+    for i, pixel_idx in enumerate(pixel_idxs):
+        grad_dir = pixel_grads[i]
+        loc = [pixel_idx[1], pixel_idx[0], 1]
+        vp_thetas = helper_fn.vp2dir(camera_intrinsics, rotation_mtx, loc)
+
+        pixel_posterior = 0
+        for m, prior in enumerate(PRIOR_DISTRIBUTION):
+            if m < 3:
+                err = helper_fn.remove_polarity(grad_dir - vp_thetas[m])
+                likelihood = P_ANG.pdf(err)
+            else:
+                likelihood = 1 / (2 * np.pi)
+            pixel_posterior += likelihood * prior
+        posterior += math.log(pixel_posterior)
     return posterior
 
 
-def degree_to_radian(angle_in_degrees):
-    return angle_in_degrees / 180 * math.pi
+def get_initial_rot(pixel_idxs, pixel_grads, camera_intrinsics):
+    print("*** finding initial camera rotations ***")
+    betas = np.linspace(-np.pi / 3, np.pi / 3, 60)
+    posteriors = np.zeros_like(betas)
+    for i, b in enumerate(betas):
+        posteriors[i] = compute_posterior(0, b, 0, pixel_idxs, pixel_grads, camera_intrinsics)
+    opt_idx = np.argmax(posteriors).item()
+    opt_b = betas[opt_idx]
+
+    search_range = [-1.0, 0, 1.0]
+    angles = list()
+    posteriors = list()
+    for i in range(len(search_range)):
+        b = opt_b + np.pi / 90 * search_range[i]
+        for j in range(len(search_range)):
+            a = np.pi / 36 * search_range[j]
+            for k in range(len(search_range)):
+                g = np.pi / 36 * search_range[k]
+                angles.append([a, b, g])
+                posteriors.append(compute_posterior(a, b, g, pixel_idxs, pixel_grads, camera_intrinsics))
+    opt_idx = np.argmax(posteriors).item()
+    return angles[opt_idx]
 
 
-def estimate_initial_euler_angles(camera_intrinsics, pixel_locations, pixel_grad_directions):
-    """ Reimplementation of https://pdfs.semanticscholar.org/3f12/20be9e783caa716482863af4a671197c6aeb.pdf """
-    best_posterior = None
-    best_posterior_degrees = [0, 0, 0]
-
-    # search along b first
-    print("Searching for best initial euler angles")
-    for b in tqdm(range(-45, 46, 4)):
-        posterior = compute_posterior(camera_intrinsics, a=0, b=b, g=0, pixel_locations=pixel_locations,
-                                      pixel_grad_directions=pixel_grad_directions)
-        if best_posterior is None:  # set initial values
-            best_posterior = posterior
-            best_posterior_degrees[1] = b
-
-        if best_posterior < posterior:
-            best_posterior = posterior
-            best_posterior_degrees[1] = b
-
-    # medium-scale search:
-    medium_search_multipliers = np.array([-1, 0, 1], dtype=float)
-    for b in medium_search_multipliers * 2 + best_posterior_degrees[1]:
-        for a in medium_search_multipliers * 5:
-            for g in medium_search_multipliers * 5:
-                posterior = compute_posterior(camera_intrinsics, a=a, b=b, g=g, pixel_locations=pixel_locations,
-                                              pixel_grad_directions=pixel_grad_directions)
-                if best_posterior < posterior:
-                    best_posterior = posterior
-                    best_posterior_degrees = [a, b, g]
-
-    # fine-scale-search
-    fine_search_multipliers = np.array([-2, -1, 0, 1, 2], dtype=float)
-    for a in fine_search_multipliers * 2.5 + best_posterior_degrees[0]:
-        for g in fine_search_multipliers * 2.5 + best_posterior_degrees[2]:
-            posterior = compute_posterior(camera_intrinsics, a=a, b=best_posterior_degrees[1], g=g,
-                                          pixel_locations=pixel_locations, pixel_grad_directions=pixel_grad_directions)
-            if best_posterior < posterior:
-                best_posterior = posterior
-                best_posterior_degrees = [a, best_posterior_degrees[1], g]
-    return best_posterior_degrees, best_posterior
+def get_vp(rotation_mtx, camera_instrinsics):
+    vp = np.matmul(camera_instrinsics, np.matmul(rotation_mtx, helper_fn.vp_dir))
+    return vp
 
 
-def annotate_pixel_locations(image, pixel_locations, save_filename, region_size=1, color=(0, 0, 255)):
-    image_to_annotate = copy.deepcopy(image)
-    locations_to_annotate = copy.deepcopy(pixel_locations) * 5 + 4
-    image_width, image_height, _ = image.shape
-    for (u, v) in locations_to_annotate:
-        annotate_pixel(color, image_to_annotate, u, v)
-    save_image(image_to_annotate, save_dir=pixel_dir, save_filename=save_filename)
-
-
-def annotate_pixel(color, image_to_annotate, u, v, image_height=IMAGE_HEIGHT, image_width=IMAGE_WIDTH, region_size=1):
-    for i in range(u - region_size, min(u + region_size + 1, image_width - 1)):
-        for j in range(v - region_size, min(v + region_size + 1, image_height - 1)):
-            image_to_annotate[i, j] = color
-
-
-def get_vp_from_euler_angles(camera_intrisincs, euler_angles):
-    assert len(euler_angles) == 3
-    euler_angles_in_radian = [degree_to_radian(euler_angle) for euler_angle in euler_angles]
-    rot_matrix = helper_functions.angle2matrix(*euler_angles_in_radian)
-    vanishing_points = np.matmul(camera_intrisincs, np.matmul(rot_matrix, helper_functions.vp_dir))
-    return vanishing_points
-
-
-def save_vanishing_points(image, homogenous_vanishing_points, filename, save_dir):
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-    image = copy.deepcopy(image)
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # otherwise the color will be weird
-    save_filepath = os.path.join(save_dir, filename[:-3] + 'png')
-    plt.imshow(image)
-
-    x, y = list(), list()
-    for i in range(3):
-        if homogenous_vanishing_points[2, i] == float(0):
-            continue  # will be an infinity
-
-        u, v = homogenous_vanishing_points[:2, i] / homogenous_vanishing_points[2, i]
-        if -VP_THRESHOLD < u < (IMAGE_WIDTH + VP_THRESHOLD) and -VP_THRESHOLD < v < (IMAGE_HEIGHT + VP_THRESHOLD):
-            x.append(u)
-            y.append(v)
-    plt.scatter(x, y)
-    plt.savefig(save_filepath)
-    plt.close()
-
-
-def expectation_step(camera_intrinsics, rot_matrix, pixel_locations, pixel_grad_directions):
-    pixel_assignment_probs = list()
-    for i, (u, v) in enumerate(pixel_locations):
-        pixel_grad_direction = pixel_grad_directions[i]
-        homogenous_location = [u, v, 1]
-        vp_thetas = helper_functions.vp2dir(camera_intrinsics, rot_matrix, homogenous_location)
-
-        pixel_assignment_prob = np.zeros(shape=NUM_MODELS)
-        for m_idx in range(NUM_MODELS):
-            m = m_idx + 1
-            if m <= 3:
-                assignment_prob = P_ANG.pdf(helper_functions.remove_polarity(pixel_grad_direction - vp_thetas[m_idx]))
-            else:
-                assignment_prob = 1 / (2 * math.pi)
-            assignment_prob *= EDGE_MODELS_PRIOR[m_idx]
-            pixel_assignment_prob[m_idx] = assignment_prob
-        pixel_assignment_prob /= np.sum(pixel_assignment_prob)
-        pixel_assignment_probs.append(pixel_assignment_prob)
-    return np.array(pixel_assignment_probs, dtype=float)
-
-
-def minimization_func(s, camera_intrinsics, pixel_locations, pixel_grads, pixel_assignments):
+def error_fn(rotation_vec, w_pm, pixel_idxs, pixel_grads, camera_intrinsics):
     residuals = list()
-    rot_matrix = helper_functions.vector2matrix(s)
-    for i, location in enumerate(pixel_locations):
-        thetas = helper_functions.vp2dir(camera_intrinsics, rot_matrix, location)
-        grad = pixel_grads[i]
-        assignments = pixel_assignments[i]
-        for j, wpm in enumerate(assignments):  # minimize over first 3 models
-            residuals.append(math.sqrt(wpm) * (helper_functions.remove_polarity(grad - thetas[j])))
+    rotation_mtx = helper_fn.vector2matrix(rotation_vec)
+    for i, pixel_idx in enumerate(pixel_idxs):
+        loc = [pixel_idx[1], pixel_idx[0], 1]
+        pixel_grad = pixel_grads[i]
+        thetas = helper_fn.vp2dir(camera_intrinsics, rotation_mtx, loc)
+        pixel_wpm = w_pm[i]
+        for j, wpm in enumerate(pixel_wpm[:3]):
+            residuals.append(math.sqrt(wpm) * (helper_fn.remove_polarity(pixel_grad - thetas[j])))
     return np.array(residuals)
 
 
-def minimization_step(rot_matrix, camera_intrinsics, pixel_locations, pixel_grads, pixel_assignments):
-    """ Sum over the difference in gradients and estimated gradients theta i.e. vanishing point. """
-    initial_s = helper_functions.matrix2vector(rot_matrix)
+def e_step(rotation_vec, pixel_idxs, pixel_grads, camera_intrinsics):
+    """
+    :param rotation_vec : the Cayley-Gibbs-Rodrigu representation of camera rotation parameters
+    :return: w_pm
+    """
+    rotation_mtx = helper_fn.vector2matrix(rotation_vec)
+    w_pm = np.zeros([len(pixel_idxs), 4], dtype=np.float32)
 
-    grads = np.array(pixel_grads)
-    assignments = np.array(pixel_assignments)
-    result = optim.least_squares(minimization_func, x0=initial_s,
-                                 args=(camera_intrinsics, pixel_locations, grads, assignments))
-    # assert isinstance(result, optim.OptimizeResult)
+    for i, pixel_idx in enumerate(pixel_idxs):
+        pixel_grad = pixel_grads[i]
+        loc = [pixel_idx[1], pixel_idx[0], 1]
+        vp_thetas = helper_fn.vp2dir(camera_intrinsics, rotation_mtx, loc)
 
-    rot = helper_functions.vector2matrix(result.x)
-    return rot, result.cost
+        for m, prior in enumerate(PRIOR_DISTRIBUTION):
+            if m < 3:
+                err = helper_fn.remove_polarity(pixel_grad - vp_thetas[m])
+                likelihood = P_ANG.pdf(err)
+            else:
+                likelihood = 1 / (2 * np.pi)
+            w_pm[i, m] = likelihood * prior
 
-
-def get_pixel_gradients(grad_mags, grad_directions, pixel_locations):
-    pixel_grad_mags, pixel_grad_directions = list(), list()
-    for i, j in pixel_locations:
-        pixel_grad_mags.append(grad_mags[i, j])
-        pixel_grad_directions.append(grad_directions[i, j])
-    return np.array(pixel_grad_mags), np.array(pixel_grad_directions)
-
-
-def annotate_assignments(image, pixel_locations, pixel_assignments):
-    annotated_image = copy.deepcopy(image)
-    for i, (u, v) in enumerate(pixel_locations):
-        pixel_assignment = pixel_assignments[i]
-        idx = np.argmax(pixel_assignment[:3])
-        if idx >= 3:  # model 4, 5
-            continue
-        else:
-            pixel_color = np.array([0, 0, 0], dtype=int)
-            pixel_color[idx] = 255
-            annotate_pixel(color=pixel_color, image_to_annotate=annotated_image, u=u, v=v)
-    return annotated_image
+        # normalize
+        total_prob = np.sum(w_pm[i, :])
+        w_pm[i, :] /= total_prob
+    return w_pm
 
 
-def em_optimize(camera_intrinsics, pixel_grad_directions, pixel_locations, rot_matrix):
-    assignment_probs = None
-    lowest_cost = None
-    best_timestamp = 0
-
-    grad_in_radians = [degree_to_radian(direction) for direction in pixel_grad_directions]
-    for timestamp in tqdm(range(100)):
-        assignment_probs = expectation_step(camera_intrinsics=camera_intrinsics,
-                                            rot_matrix=rot_matrix,
-                                            pixel_locations=pixel_locations,
-                                            pixel_grad_directions=grad_in_radians)
-        rot_matrix, cost = minimization_step(rot_matrix=rot_matrix, camera_intrinsics=camera_intrinsics,
-                                             pixel_locations=pixel_locations, pixel_grads=grad_in_radians,
-                                             pixel_assignments=assignment_probs)
-        if lowest_cost is None or lowest_cost > cost:
-            lowest_cost = cost
-            best_timestamp = timestamp
-
-        if (best_timestamp - timestamp) > IMPROVEMENT_PATIENCE:
-            print('Converged! early stopping...')
-            break  # no more improvements over recent timestamps, converged.
-    return assignment_probs, rot_matrix
+def m_step(rotation_vec, w_pm, pixel_idxs, pixel_grads, camera_intrinsics):
+    """
+    :param rotation_vec: the camera rotation parameters from the previous step
+    :param pixel_idxs: weights from E-step
+    :param pixel_grads:
+    :param camera_intrinsics:
+    :return:
+    """
+    rotation_vec = least_squares(error_fn, rotation_vec, args=(w_pm, pixel_idxs, pixel_grads, camera_intrinsics))
+    return rotation_vec
 
 
 def process_image(image_filename):
-    print('Processing {}'.format(image_filename))
-    image = read_image(image_filename)
-    camera_intrinsics = helper_functions.cam_intrinsics(camera_parameters_filepath)
-
-    # Step 1: preprocess.
+    image_filepath = os.path.join(data_dir, image_filename)
+    camera_intrinsics = get_camera_intrinsics(camera_intrinsics_filepath)
+    image = read_image(image_filepath)
     grayscale_image = get_grayscale_image(image)
-    save_image(grayscale_image, save_dir=grayscale_dir, save_filename=image_filename)
-    grad_mags, grad_directions = get_image_gradients(grayscale_image)
-    pixel_idxs = get_em_pixel_idxs(grad_mags=grad_mags, grad_directions=grad_directions)
-    annotate_pixel_locations(image, pixel_idxs, image_filename)
 
-    pixel_locations = np.array(pixel_idxs) * 5 + 4
-    pixel_grad_mags, pixel_grad_directions = get_pixel_gradients(grad_mags, grad_directions, pixel_locations)
-    initial_euler_angles, initial_max_posterior = estimate_initial_euler_angles(camera_intrinsics, pixel_locations,
-                                                                                pixel_grad_directions)
-    initial_vp = get_vp_from_euler_angles(camera_intrinsics, initial_euler_angles)
-    save_vanishing_points(image, homogenous_vanishing_points=initial_vp, filename=image_filename,
-                          save_dir=initial_vp_dir)
+    grad_mags, grad_dirs = get_image_gradients(grayscale_image)
+    grad_dirs, idxs = helper_fn.down_sample(grad_mags, grad_dirs)
 
-    initial_euler_radians = [degree_to_radian(angle) for angle in initial_euler_angles]
-    rot_matrix = helper_functions.angle2matrix(*initial_euler_radians)
+    # serach for initial vp
+    pixel_grads = list()
+    for i, j in idxs:
+        pixel_grads.append(grad_dirs[i, j])
+    pixel_grads = np.array(pixel_grads)
+    pixel_idxs = np.reshape(idxs, newshape=(-1, 2)) * 5 + 4
+    initial_euler = get_initial_rot(pixel_idxs, pixel_grads, camera_intrinsics)
 
-    assignment_probs, final_rot_matrix = em_optimize(camera_intrinsics, pixel_grad_directions, pixel_locations,
-                                                     rot_matrix)
-    final_vp = np.matmul(camera_intrinsics, np.matmul(final_rot_matrix, helper_functions.vp_dir))
-    annotated_image = annotate_assignments(image, pixel_locations, assignment_probs)
-    save_image(annotated_image, save_dir=assignment_dir, save_filename=image_filename)
-    save_vanishing_points(image, final_vp, filename=image_filename, save_dir=final_vp_dir)
+    # save initial vanishing points
+    rotation_mtx = helper_fn.angle2matrix(*initial_euler)
+    initial_vp = get_vp(rotation_mtx, camera_intrinsics)
+    save_vanishing_points(image, initial_vp, image_filename, os.path.join(result_dir, 'initial-vp'))
+    save_rotation_matrix(rotation_mtx, image_filename.split('.')[0], os.path.join(result_dir, 'initial-vp'))
 
-    print('rotation matrix:\n{}'.format(final_rot_matrix))
-    rot_matrix_filename = image_filename[:-3] + '.npy'
-    rot_matrix_filepath = os.path.join(final_vp_dir, rot_matrix_filename)
-    np.save(rot_matrix_filepath, final_rot_matrix)
+    print("*** executing EM optimization ***")
+    rotation_vec = helper_fn.matrix2vector(rotation_mtx)
+    w_pm = None
+    for i in range(N_ITERATIONS):
+        start_t = time.time()
+        w_pm = e_step(rotation_vec, pixel_idxs, pixel_grads, camera_intrinsics)
+        opt = m_step(rotation_vec, w_pm, pixel_idxs, pixel_grads, camera_intrinsics)
+        rotation_vec = opt.x
+        print('iter {}: {}'.format(i, time.time() - start_t))
+    rotation_mtx = helper_fn.vector2matrix(rotation_vec)
+    final_vp = get_vp(rotation_mtx, camera_intrinsics)
+    save_vanishing_points(image, final_vp, image_filename, os.path.join(result_dir, 'final-vp'))
+    save_rotation_matrix(rotation_mtx, image_filename.split('.')[0], os.path.join(result_dir, 'final-vp'))
+    assigned_image = save_assignments(image, w_pm, pixel_idxs, image_filename, os.path.join(result_dir, 'assignment'))
+    save_vanishing_points(assigned_image, final_vp, image_filename, os.path.join(result_dir, 'final-assign-vp'))
+
+
+def main():
+    for image_filename in image_filenames:
+        process_image(image_filename)
 
 
 if __name__ == '__main__':
-    for image_filename in image_filenames:
-        process_image(image_filename)
+    main()
