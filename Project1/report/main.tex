@@ -8,50 +8,70 @@
 
 \usepackage{graphicx}
 \author{Kennard Ng and Luo Wen Han}
-\title{Project 3: Seam Carving}
+\title{Project 1: Manhattan World}
+
+\bibliographystyle{unsrt}
 
 \begin{document}
 	\maketitle
+	\section{Introduction}
 	
-	We use seam carving for image resizing. Ideally, we want to preserve important information in the image. We do this by carving out parts of the image that are redundant i.e. carry the least information. 
+	In this project, we use the expectation maximization framework to simultaneously obtain the extrinsic camera parameters i.e. the camera's rotation matrix and its translation, and the vanishing points of the image. 
 	
-	More specifically, we carve out seams of pixels from the image. A seam is defined as a path of pixels from one side of an image to its opposing side. In our task, we perform a horizontally resizing of the image where we remove vertical seams i.e. a path of pixels from the top to the bottom of the image, that carry the least amount of important information about the image. 
+	This problem is a chicken-and-egg problem where the extrinsic camera parameters are needed to determine the vanishing points, and the vanishing points can be used to deterimine the extrinsic camera parameters. 
+	
+	We apply the expectation maximization framework to images that are consistent with the Manhattan World Assumption, where 
+	%todo: manhattan world assumption her. 
 	
 	\section{Background}
 	
-	Formally, we represent the image as a Hidden Markov Model(HMM). Suppose the image has $r$ rows and $c$ columns, where each pixel is the parent of every other pixel in the next row. Let the each pixel be indexed by $i,j$, and have a hidden random variable $Z_{i,j}$ that denotes the importance of the pixel and  an observed variable $X_{i,j}$ that is conditioned on the $Z_{i,j}$. More specifically, the relationship between variables $Z_{0,1}, Z_{1,1}, Z_{2,1}$ and $X_{1,1}$ is as follows: 
+	\subsection{Perspective Projection}
+	
+	Perspective transformations are extensively used in Computer Vision because they model the transformation of 3D points 
+	
+	\subsection{Vanishing Points}
+	
+	Under perspective projection, parallel lines in the 3D world appears to converge in images e.g. Figure \ref{fig:vp_eg}.
+	
 	\begin{figure}[ht]
 		\centering
-		\includegraphics[width=0.5\linewidth]{images/relationship}
-		\caption{Hidden Markov Model Example}
-		\label{fig:relationship}
+		\includegraphics[width=0.5\linewidth]{images/vp_eg}
+		\caption{Vanishing Point Example}
+		\label{fig:vp_eg}
 	\end{figure}
+
+	The point of convergence is known as the vanishing point with lines in the image pointing towards the vanishing point being described as vanishing lines. Pixels that lie on vanishing lines tend to have the same image gradient given that lie on the same line. 
 	
-	From Figure \ref{fig:relationship}, we see that every variable in the HMM is conditionally independent of other nodes in the graph given its parent. In our setting, $Z_{i,j}$ is the parent of every other random variable in the next row i.e. $Z_{i+1,k}$ for $k \in \left\{1, \cdots, m\right\}$. The edges of the HMM are defined by the transition probabilities between hidden states $p(Z_{i,j}|Z_{i+1,k})$ and the emission probability $p(Z_{i,j}|Z_{i,j})$.
+	\section{Our Approach}
 	
-	We can parameterize a seam as an extended version of the HMM given in Figure \ref{fig:relationship}. The joint probability of a single seam can be expressed as a HMM in a factorized form based on the conditional independence: 
+	In our approach, we define the rotation matrix by its euler angles: $\alpha$, $\beta$ and $\gamma$. $\alpha, \beta$ and $\gamma$ are the rotation angles about the $x, y$ and $z$ axes respectively. 
+	
+	
+	
+	\subsection{Initialization}
+	
+	We use the coarse-to-fine search strategy proposed in~\cite{Coughlan:2000:MWA:3008751.3008869} to intialize euler angles before performing expectation minimization. In this search strategy, we explore discrete values to obtain a rough estimate of the camera parameters. From the search, we select the values that maximize the posterior over the search range:
 	
 	\begin{equation}
-		\Pr(X, Z)=\prod_{i=0}^{r-1} \prod_{j=0}^{c-1} \prod_{k=0}^{c-1} \Pr\left(z_{i,j} | z_{i,k}\right) \Pr\left(x_{i,j} | z_{i,j}\right).
-		\label{eqn:joint}
+		P\left(M | G, \Psi\right) \propto P\left(G | M, \Psi\right) P(M),
 	\end{equation}
 	
-	In our task, we want to find the minimum a posterior of hidden states $\mathbf{Z}$ given the observations $\mathbf{O}$ where $\mathbf{O}$ is the gradients of the pixel. Given that the gradients can be zero for a single pixel, which collapses the values of joint probability of the seam to zero if we were to naively use Equation \ref{eqn:joint}, we parameterize the problem in terms of its log linear form:
-	
+	where $M, G$ and $\Psi$ denotes the assignment of pixels to vanishing points, the gradients of the pixels, and the euler angles respectively. The likelihood $P\left(G | M, \Psi \right)$ is given by: 
 	\begin{equation}
-	\log\Pr(X, Z)=\sum_{i=0}^{r-1} \sum_{j=0}^{c-1} \log\Pr\left(x_{i,j} | z_{i,j}\right) + \sum_{k=0}^{c-1} \log\Pr\left(z_{i,j} | z_{i,k}\right),
+	P\left(G | M, \Psi \right)=\left\{\begin{array}{ll}\mathcal{N}(0, 0.5) & {\text { if } m = \{1, 2, 3\}} \\ {1 / 2\pi} & {\text { if } m=4}\end{array}\right.
 	\end{equation}
 	
-	The log transition probability is given by: 
+	where $m=\{1,2,3\}$ denotes the assignment to vanishing points from the natural cartesian grid of the image and $m={4}$ denotes an assignment to other vanishing points present in the image. Given that we wish to maximize the posterior across all pixels $p$, we find euler angles that maximize the following:
 	\begin{equation}
-		\log\Pr\left(Z_{i,j} | Z_{i,k}\right)=\left\{\begin{array}{ll}{1} & {\text { if }\left|j - k\right| \leq 1} \\ {\infty} & {\text { else }}\end{array}\right. , 
-	\end{equation}
-	which implies that we the minimum configuration would only involve the three nearest pixels on the lower row i.e. $k \in \left\{j-1, j, j+1\right\}$, and we represent the log emission probability as:
-	\begin{equation}
-		\log\Pr\left(X_{i,j} | Z_{i,j}=z'\right)=E_{i,j}(z') = \eta X_{i,j},
+		\Psi^*=\operatorname{argmax}_\Psi \prod_p P(G_p|M,\Psi)P(M) = \operatorname{argmax}_{\Psi} \prod_{p} \sum_{m=1}^4 P\left(G_p|m, \Psi\right)p(m)
 	\end{equation}
 	
-	where $E$ is the energy map of the image, which we set to be the gradients $X$ multiplied by a normalizing constant $\eta$. Given that we are finding the minimum configuration, we can simply drop $\eta$ and use the gradient values. 
+	Computing $\Psi^*$ using the above approach is computationally intractable since $\prod_p P(G_p|M,\Psi)P(M) \rightarrow 0$ as $p$ increases. Hence, we use the log trick to make it tractable and compute $\Psi^*$ as follows:
+	
+	The coarse-to-fine search begins with a coarse search for $\beta$ over the range $-\pi / 3$ to $\pi / 3$ at increments of $\pi / 90$, with $\alpha, \gamma = 0$. The result of the coarse seach if the optimal coarse search value $\beta_c$.
+	
+	Then, a fine search is performed over $\alpha, \beta_c, \gamma$. Specifically, we explore over small permutations of $\pi / 90$ from $\beta_c$ for $\beta$,  $\pi / 36$ from $0$ for $\alpha$ and $\gamma$.
+	
 	
 	\section{Vertibi Algorithm}
 	
@@ -95,24 +115,11 @@
 	\section{Qualitative Results}
 	
 	These are our qualitative results:
-	\begin{figure}[ht]
-		\centering
-		\begin{subfigure}{0.45\linewidth}
-			\includegraphics[height=1.5in]{images/image_input}
-			\caption{Original Image}
-			\label{fig:imageinput}
-		\end{subfigure}
-		\begin{subfigure}{0.45\linewidth}
-			\centering
-			\includegraphics[height=1.5in]{images/image_output}
-			\caption{Resized Image}
-			\label{fig:imageoutput}
-		\end{subfigure}
-	\end{figure}
 	
 	From our results, we see that important parts of the image i.e. the person and the castle have been preserved during the resize operation, where their scale have been preserved. On the other hand, unimportant parts of the iamge i.e. background has been carved away during the resize operation.
 	
 
 	
+	\bibliography{references.bib}
 	
 \end{document}

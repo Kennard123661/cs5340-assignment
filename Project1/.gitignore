@@ -4,4 +4,6 @@ results/*
 *.pdf
 *.log
 *.aux
+*.bbl
+*.blg
 
