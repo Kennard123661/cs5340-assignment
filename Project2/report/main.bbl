@@ -5,4 +5,9 @@ David~M Blei, Andrew~Y Ng, and Michael~I Jordan.
 \newblock Latent dirichlet allocation.
 \newblock {\em Journal of machine Learning research}, 3(Jan):993--1022, 2003.
 
+\bibitem{Jordan1999}
+Michael~I. Jordan, Zoubin Ghahramani, Tommi~S. Jaakkola, and Lawrence~K. Saul.
+\newblock An introduction to variational methods for graphical models.
+\newblock {\em Machine Learning}, 37(2):183--233, Nov 1999.
+
 \end{thebibliography}
