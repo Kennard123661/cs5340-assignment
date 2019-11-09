@@ -8,9 +8,10 @@
 \usepackage{subfigure}
 \usepackage{amsmath, amssymb}
 \usepackage{graphicx}
+
 \DeclareMathOperator*{\argmin}{arg\,min}
 \author{Kennard Ng and Luo Wen Han}
-\title{Project 1: Latent Dirichlet Allocation}
+\title{Project 2: Latent Dirichlet Allocation}
 
 \bibliographystyle{unsrt}
 
@@ -31,7 +32,7 @@
 		\caption{Graphical model representation of LDA (left) and the variational distribution used to approximate the posterior in LDA (right).}
 		\label{fig:lda}
 	\end{figure}
-	Latent Dirichlet Allocation (LDA) is a generative probalistic model for a collection of discrete data proposed by Blei et al (2003).
+	Latent Dirichlet Allocation (LDA) is a generative probabilistic model for a collection of discrete data proposed by Blei et al (2003).
 	In LDA, documents are represented as random mixtures over latent topics and each topic is represented by a distribution over words.
 
 	LDA assumes the following generative process for each document $w$ in collection $D$:
@@ -89,7 +90,7 @@
 		\end{enumerate}
 	\end{enumerate}
 
-	We set the number of underlying ancerstor populations $K = 4$, and use a previously inferred $\beta$ matrix.
+	We set the number of underlying ancestor populations $K = 4$, and use a previously inferred $\beta$ matrix.
 	We can then infer the population mixture $\theta$ and the genotype ancestry assignments $z$ for any individual using variational inference.
 	By controlling the value of $\alpha$, we can also control how mixed of ancestor populations each individual has.
 
