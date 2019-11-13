@@ -32,7 +32,6 @@ def infer_all(D, beta, alpha):
     for d in D:
         w = np.repeat(np.arange(len(d)), d)
         phi, gamma, iterations = lda_inference(w, beta, alpha)
-        gamma /= gamma.sum()
 
 
 if __name__ == "__main__":
@@ -52,7 +51,6 @@ if __name__ == "__main__":
     for d in D:
         w = np.repeat(np.arange(len(d)), d)
         phi, gamma, iterations = lda_inference(w, beta)
-        gamma /= gamma.sum()
         Theta.append(gamma)
     Theta = np.array(Theta)
     with open('Theta.out', 'w') as f:
@@ -65,7 +63,6 @@ if __name__ == "__main__":
         for d in D:
             w = np.repeat(np.arange(len(d)), d)
             phi, gamma, iterations = lda_inference(w, beta, alpha)
-            gamma /= gamma.sum()
             stats.append({
                 "alpha": alpha,
                 "g0": gamma[0],
